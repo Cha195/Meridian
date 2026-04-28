@@ -1,0 +1,24 @@
+node:
+  id: us-east-1
+  listen: ":8080"
+  geoip_db: /path/to/GeoLite2-City.mmdb
+
+projects:
+  - id: proj_httpbin
+    api_key: gv_live_sk_test_123456
+    origin: https://httpbin.org
+    hosts:
+      - httpbin.example.com
+      - api.httpbin.example.com
+    cache:
+      policy: lru
+      default_ttl: 3600
+      max_size_mb: 512
+      stale_while_revalidate: 86400
+      rules:
+        - path: /get
+          ttl: 300
+        - path: /post
+          ttl: 0
+        - path: /status/*
+          ttl: 60
