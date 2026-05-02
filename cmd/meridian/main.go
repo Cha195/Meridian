@@ -1,11 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/cha195/meridian/internal/config"
+	"github.com/cha195/meridian/internal/geo"
+	"github.com/cha195/meridian/internal/proxy"
 )
 
 var (
@@ -26,7 +34,6 @@ var serveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-
 		if configPath == "" {
 			return fmt.Errorf("--config is required")
 		}
@@ -35,17 +42,49 @@ var serveCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-
 		if err := config.ValidateConfig(cfg); err != nil {
 			return err
 		}
 
-		fmt.Printf("Loaded config: node=%s, projects=%d\n", cfg.Node.ID, len(cfg.Projects))
-		for _, proj := range cfg.Projects {
-			fmt.Printf("  - %s (origin: %s, cache policy: %s)\n", proj.ID, proj.Origin, proj.Cache.Policy)
+		var geoLocator *geo.GeoLocator
+		if cfg.Node.GeoIPDB != "" {
+			geoLocator, err = geo.NewGeoLocator(cfg.Node.GeoIPDB)
+			if err != nil {
+				log.Printf("warning: GeoIP unavailable: %v", err)
+			} else {
+				defer geoLocator.Close()
+			}
+		} else {
+			log.Printf("warning: geoip_db not configured, geo routing disabled")
 		}
 
-		return nil
+		handler, err := proxy.NewProxyHandler(cfg, geoLocator)
+		if err != nil {
+			return fmt.Errorf("failed to create proxy handler: %w", err)
+		}
+
+		server := &http.Server{
+			Addr:    cfg.Node.Listen,
+			Handler: handler,
+		}
+
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+
+		go func() {
+			log.Printf("Meridian edge node [%s] listening on %s", cfg.Node.ID, cfg.Node.Listen)
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("server error: %v", err)
+			}
+		}()
+
+		<-stop
+		log.Println("shutting down...")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		return server.Shutdown(ctx)
 	},
 }
 

@@ -1,4 +1,4 @@
-.PHONY: build test lint clean
+.PHONY: build test lint clean run
 
 build:
 	go build -o bin/meridian ./cmd/meridian
@@ -11,3 +11,6 @@ lint:
 
 clean:
 	rm -rf bin/
+
+run:
+	go run ./cmd/meridian serve --config config.example.yaml
