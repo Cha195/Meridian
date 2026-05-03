@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cha195/meridian/internal/cache"
@@ -22,16 +23,21 @@ import (
 const maxCacheBodySize = 10 * 1024 * 1024 // 10MB
 
 type ProxyHandler struct {
-	projects   map[string]*config.ProjectConfig
-	geoLocator *geo.GeoLocator
-	caches     map[string]cache.CachePolicy
+	projects     map[string]*config.ProjectConfig
+	geoLocator   *geo.GeoLocator
+	clusterState *geo.ClusterState
+	caches       map[string]cache.CachePolicy
+	varyStore    map[string][]string // "METHOD:path" → Vary header names from origin
+	varyMu       sync.RWMutex
 }
 
-func NewProxyHandler(cfg *config.Config, geoLocator *geo.GeoLocator) (*ProxyHandler, error) {
+func NewProxyHandler(cfg *config.Config, geoLocator *geo.GeoLocator, clusterState *geo.ClusterState) (*ProxyHandler, error) {
 	h := &ProxyHandler{
-		projects:   make(map[string]*config.ProjectConfig),
-		geoLocator: geoLocator,
-		caches:     make(map[string]cache.CachePolicy),
+		projects:     make(map[string]*config.ProjectConfig),
+		geoLocator:   geoLocator,
+		clusterState: clusterState,
+		caches:       make(map[string]cache.CachePolicy),
+		varyStore:    make(map[string][]string),
 	}
 
 	for i := range cfg.Projects {
@@ -81,7 +87,23 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		geoResult = h.geoLocator.Lookup(clientIP)
 	}
 
-	cacheKey := buildCacheKey(proj.ID, r)
+	// Cache safety has three layers:
+	//
+	// Layer 1: Auth bypass — requests with Authorization or Cookie headers
+	//   are never cached unless origin explicitly returns Cache-Control: public.
+	//   This prevents serving User A's personalized response to User B.
+	//
+	// Layer 2: Vary headers — origin can declare which request headers affect
+	//   the response. Cache keys include Vary header values so different
+	//   variants are stored separately (e.g. per-language, per-encoding).
+	//
+	// Layer 3: Path rules in config — operators can set ttl: 0 for paths
+	//   that should never be cached regardless of headers (e.g. /api/*).
+	//   This is the safety net for origins that don't set headers correctly.
+
+	// Look up known Vary headers for this path to construct the correct cache key.
+	varyHeaders := h.getVaryHeaders(r.Method, r.URL.Path)
+	cacheKey := buildCacheKey(proj.ID, r, varyHeaders)
 	c := h.caches[proj.ID]
 
 	entry, status := c.Get(cacheKey)
@@ -94,7 +116,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case cache.CacheSTALE:
 		writeFromCache(w, entry)
-		go h.revalidate(r, proj, c, cacheKey)
+		go h.revalidate(r, proj, c, cacheKey, varyHeaders)
 		logRequest(r, proj.ID, "STALE", http.StatusOK, time.Since(start), geoResult)
 		return
 	}
@@ -123,23 +145,32 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rp.ServeHTTP(rec, r)
 
-	if isCacheable(r, rec, proj) {
-		ttl := getTTL(r.URL.Path, proj)
-		if ttl > 0 {
-			body := rec.body.Bytes()
-			headers := rec.header.Clone()
-			ce := &cache.CacheEntry{
-				Key: cacheKey,
-				Response: cache.CachedResponse{
-					StatusCode: rec.statusCode,
-					Headers:    headers,
-					Body:       body,
-				},
-				SizeBytes: int64(len(body)),
+	// Layer 2: Vary header handling — read what the origin says varies,
+	// update varyStore, and rebuild the cache key with the correct values.
+	varyHeaderValue := rec.header.Get("Vary")
+	if varyHeaderValue != "*" {
+		newVaryHeaders := parseVaryHeader(varyHeaderValue)
+		h.updateVaryHeaders(r.Method, r.URL.Path, newVaryHeaders)
+
+		if isCacheable(r, rec, proj) {
+			ttl := getTTL(r.URL.Path, proj)
+			if ttl > 0 {
+				// Rebuild key with the Vary headers we just learned from origin.
+				properKey := buildCacheKey(proj.ID, r, newVaryHeaders)
+				body := rec.body.Bytes()
+				ce := &cache.CacheEntry{
+					Key: properKey,
+					Response: cache.CachedResponse{
+						StatusCode: rec.statusCode,
+						Headers:    rec.header.Clone(),
+						Body:       body,
+					},
+					SizeBytes: int64(len(body)),
+				}
+				staleExtra := time.Duration(proj.Cache.StaleWhileRevalidate) * time.Second
+				ce.StaleDeadline = time.Now().Add(ttl).Add(staleExtra)
+				c.Set(properKey, ce, ttl)
 			}
-			staleExtra := time.Duration(proj.Cache.StaleWhileRevalidate) * time.Second
-			ce.StaleDeadline = time.Now().Add(ttl).Add(staleExtra)
-			c.Set(cacheKey, ce, ttl)
 		}
 	}
 
@@ -154,7 +185,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logRequest(r, proj.ID, "MISS", rec.statusCode, time.Since(start), geoResult)
 }
 
-func (h *ProxyHandler) revalidate(r *http.Request, proj *config.ProjectConfig, c cache.CachePolicy, cacheKey string) {
+func (h *ProxyHandler) revalidate(r *http.Request, proj *config.ProjectConfig, c cache.CachePolicy, cacheKey string, varyHeaders []string) {
 	req := r.Clone(r.Context())
 
 	originURL, err := url.Parse(proj.Origin)
@@ -176,6 +207,10 @@ func (h *ProxyHandler) revalidate(r *http.Request, proj *config.ProjectConfig, c
 	}
 	rp.ServeHTTP(rec, req)
 
+	if rec.header.Get("Vary") == "*" {
+		return
+	}
+
 	if isCacheable(r, rec, proj) {
 		ttl := getTTL(r.URL.Path, proj)
 		if ttl > 0 {
@@ -194,7 +229,17 @@ func (h *ProxyHandler) revalidate(r *http.Request, proj *config.ProjectConfig, c
 	}
 }
 
+// isCacheable applies the three-layer cache safety model.
 func isCacheable(req *http.Request, rec *responseRecorder, proj *config.ProjectConfig) bool {
+	// Layer 1: Auth bypass — credentials mean personalized content.
+	// Only cache if origin explicitly says it is public.
+	if req.Header.Get("Authorization") != "" || req.Header.Get("Cookie") != "" {
+		cc := rec.header.Get("Cache-Control")
+		if !strings.Contains(cc, "public") {
+			return false
+		}
+	}
+
 	if req.Method != http.MethodGet && req.Method != http.MethodHead {
 		return false
 	}
@@ -227,7 +272,7 @@ func getTTL(path string, proj *config.ProjectConfig) time.Duration {
 	return time.Duration(proj.Cache.DefaultTTL) * time.Second
 }
 
-func buildCacheKey(projectID string, r *http.Request) string {
+func buildCacheKey(projectID string, r *http.Request, varyHeaders []string) string {
 	queryKeys := make([]string, 0, len(r.URL.Query()))
 	for k := range r.URL.Query() {
 		queryKeys = append(queryKeys, k)
@@ -239,8 +284,51 @@ func buildCacheKey(projectID string, r *http.Request) string {
 		parts = append(parts, k+"="+r.URL.Query().Get(k))
 	}
 
-	query := strings.Join(parts, "&")
-	return projectID + ":" + r.Method + ":" + r.URL.Path + "?" + query
+	key := projectID + ":" + r.Method + ":" + r.URL.Path + "?" + strings.Join(parts, "&")
+
+	// Layer 2: append Vary header values to differentiate per-variant responses.
+	if len(varyHeaders) > 0 {
+		sorted := make([]string, len(varyHeaders))
+		copy(sorted, varyHeaders)
+		sort.Strings(sorted)
+		for _, h := range sorted {
+			key += "|" + strings.ToLower(h) + "=" + r.Header.Get(h)
+		}
+	}
+
+	return key
+}
+
+func (h *ProxyHandler) getVaryHeaders(method, path string) []string {
+	h.varyMu.RLock()
+	defer h.varyMu.RUnlock()
+	if v, ok := h.varyStore[method+":"+path]; ok {
+		out := make([]string, len(v))
+		copy(out, v)
+		return out
+	}
+	return nil
+}
+
+func (h *ProxyHandler) updateVaryHeaders(method, path string, headers []string) {
+	h.varyMu.Lock()
+	defer h.varyMu.Unlock()
+	h.varyStore[method+":"+path] = headers
+}
+
+func parseVaryHeader(vary string) []string {
+	if vary == "" {
+		return nil
+	}
+	parts := strings.Split(vary, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, http.CanonicalHeaderKey(p))
+		}
+	}
+	return out
 }
 
 func extractClientIP(r *http.Request) string {
@@ -285,17 +373,8 @@ type responseRecorder struct {
 	body       bytes.Buffer
 }
 
-func (rr *responseRecorder) Header() http.Header {
-	return rr.header
-}
+func (rr *responseRecorder) Header() http.Header        { return rr.header }
+func (rr *responseRecorder) WriteHeader(code int)       { rr.statusCode = code }
+func (rr *responseRecorder) Write(b []byte) (int, error) { return rr.body.Write(b) }
 
-func (rr *responseRecorder) WriteHeader(statusCode int) {
-	rr.statusCode = statusCode
-}
-
-func (rr *responseRecorder) Write(b []byte) (int, error) {
-	return rr.body.Write(b)
-}
-
-// Ensure responseRecorder satisfies io.Writer for httputil internals.
 var _ io.Writer = (*responseRecorder)(nil)

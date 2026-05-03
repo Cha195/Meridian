@@ -37,7 +37,7 @@ func TestProxyBasicForward(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -45,7 +45,6 @@ func TestProxyBasicForward(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/hello", nil)
 	req.Host = "test.example.com"
 	rec := httptest.NewRecorder()
-
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -65,22 +64,19 @@ func TestProxyCacheHit(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
 
-	// First request — MISS, origin called
 	req1 := httptest.NewRequest(http.MethodGet, "/cacheable", nil)
 	req1.Host = "test.example.com"
-	rec1 := httptest.NewRecorder()
-	handler.ServeHTTP(rec1, req1)
+	handler.ServeHTTP(httptest.NewRecorder(), req1)
 
 	if callCount != 1 {
 		t.Errorf("expected 1 origin call after first request, got %d", callCount)
 	}
 
-	// Second request — HIT, origin not called again
 	req2 := httptest.NewRequest(http.MethodGet, "/cacheable", nil)
 	req2.Host = "test.example.com"
 	rec2 := httptest.NewRecorder()
@@ -106,7 +102,7 @@ func TestProxyCacheNoPOST(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -114,8 +110,7 @@ func TestProxyCacheNoPOST(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/submit", nil)
 		req.Host = "test.example.com"
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
 	}
 
 	if callCount != 3 {
@@ -129,7 +124,7 @@ func TestProxyHostMatching(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -137,7 +132,6 @@ func TestProxyHostMatching(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Host = "unknown.host.com"
 	rec := httptest.NewRecorder()
-
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
@@ -154,21 +148,210 @@ func TestProxyTTLRules(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
 
-	// /api/* has TTL 0 — should never cache
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
 		req.Host = "test.example.com"
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
 		time.Sleep(time.Millisecond)
 	}
 
 	if callCount != 3 {
 		t.Errorf("/api/* with ttl:0 should not cache: expected 3 origin calls, got %d", callCount)
+	}
+}
+
+// --- Cache safety tests ---
+
+func TestCacheBypassWithAuthHeader(t *testing.T) {
+	callCount := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("private data"))
+	}))
+	defer origin.Close()
+
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+		req.Host = "test.example.com"
+		req.Header.Set("Authorization", "Bearer token123")
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	if callCount != 2 {
+		t.Errorf("authorized requests should not cache: expected 2 origin calls, got %d", callCount)
+	}
+}
+
+func TestCacheBypassWithCookie(t *testing.T) {
+	callCount := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("user session data"))
+	}))
+	defer origin.Close()
+
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+		req.Host = "test.example.com"
+		req.Header.Set("Cookie", "session=abc123")
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	if callCount != 2 {
+		t.Errorf("cookie requests should not cache (no public override): expected 2 origin calls, got %d", callCount)
+	}
+}
+
+func TestCacheWithPublicOverride(t *testing.T) {
+	callCount := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("public despite cookie"))
+	}))
+	defer origin.Close()
+
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/public-asset", nil)
+		req.Host = "test.example.com"
+		req.Header.Set("Cookie", "session=abc123")
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	if callCount != 1 {
+		t.Errorf("Cache-Control: public should allow caching despite Cookie: expected 1 origin call, got %d", callCount)
+	}
+}
+
+func TestVaryHeaderCacheSeparation(t *testing.T) {
+	callCount := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Vary", "Accept-Language")
+		w.WriteHeader(http.StatusOK)
+		lang := r.Header.Get("Accept-Language")
+		if lang == "" {
+			lang = "en"
+		}
+		w.Write([]byte("content in " + lang))
+	}))
+	defer origin.Close()
+
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	doRequest := func(lang string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/products", nil)
+		req.Host = "test.example.com"
+		req.Header.Set("Accept-Language", lang)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Request 1: en — MISS
+	doRequest("en")
+	if callCount != 1 {
+		t.Fatalf("expected 1 origin call after first en request, got %d", callCount)
+	}
+
+	// Request 2: en — HIT
+	rec := doRequest("en")
+	if callCount != 1 {
+		t.Errorf("second en request should be a HIT, got %d origin calls", callCount)
+	}
+	if rec.Header().Get("X-Cache") != "HIT" {
+		t.Errorf("expected X-Cache: HIT for second en request")
+	}
+
+	// Request 3: fr — MISS (different Vary value)
+	doRequest("fr")
+	if callCount != 2 {
+		t.Errorf("fr request should be a MISS (different Vary key), got %d origin calls", callCount)
+	}
+
+	// Request 4: fr — HIT
+	rec = doRequest("fr")
+	if callCount != 2 {
+		t.Errorf("second fr request should be a HIT, got %d origin calls", callCount)
+	}
+	if rec.Header().Get("X-Cache") != "HIT" {
+		t.Errorf("expected X-Cache: HIT for second fr request")
+	}
+}
+
+func TestVaryWildcardNotCached(t *testing.T) {
+	callCount := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Vary", "*")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("unique every time"))
+	}))
+	defer origin.Close()
+
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/dynamic", nil)
+		req.Host = "test.example.com"
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	if callCount != 3 {
+		t.Errorf("Vary: * should never cache: expected 3 origin calls, got %d", callCount)
+	}
+}
+
+func TestPathRuleBypassesEverything(t *testing.T) {
+	callCount := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("health ok"))
+	}))
+	defer origin.Close()
+
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+		req.Host = "test.example.com"
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	if callCount != 3 {
+		t.Errorf("path rule ttl:0 should bypass cache: expected 3 origin calls, got %d", callCount)
 	}
 }

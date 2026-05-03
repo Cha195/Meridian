@@ -58,7 +58,12 @@ var serveCmd = &cobra.Command{
 			log.Printf("warning: geoip_db not configured, geo routing disabled")
 		}
 
-		handler, err := proxy.NewProxyHandler(cfg, geoLocator)
+		clusterState, err := geo.NewClusterState(cfg.Node.ID, cfg.Cluster.Nodes)
+		if err != nil {
+			return fmt.Errorf("failed to initialize cluster state: %w", err)
+		}
+
+		handler, err := proxy.NewProxyHandler(cfg, geoLocator, clusterState)
 		if err != nil {
 			return fmt.Errorf("failed to create proxy handler: %w", err)
 		}
@@ -67,6 +72,25 @@ var serveCmd = &cobra.Command{
 			Addr:    cfg.Node.Listen,
 			Handler: handler,
 		}
+
+		// Handle SIGHUP: reload config and update cluster node list without restart.
+		sighup := make(chan os.Signal, 1)
+		signal.Notify(sighup, syscall.SIGHUP)
+		go func() {
+			for range sighup {
+				newCfg, err := config.LoadConfig(configPath)
+				if err != nil {
+					log.Printf("config reload failed: %v", err)
+					continue
+				}
+				if err := config.ValidateConfig(newCfg); err != nil {
+					log.Printf("config reload validation failed: %v", err)
+					continue
+				}
+				clusterState.UpdateNodes(newCfg.Cluster.Nodes)
+				log.Printf("config reloaded: cluster updated with %d nodes", len(newCfg.Cluster.Nodes))
+			}
+		}()
 
 		stop := make(chan os.Signal, 1)
 		signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)

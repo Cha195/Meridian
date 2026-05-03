@@ -3,6 +3,25 @@ node:
   listen: ":8080"
   geoip_db: /path/to/GeoLite2-City.mmdb
 
+cluster:
+  nodes:
+    - id: us-east-1
+      lat: 39.0481
+      lng: -77.4728
+      addr: "http://localhost:9090"
+    - id: eu-west-1
+      lat: 53.3331
+      lng: -6.2489
+      addr: "http://eu-west-1.meridian.sricharan.dev:9090"
+    - id: ap-northeast-1
+      lat: 35.6762
+      lng: 139.6503
+      addr: "http://ap-northeast-1.meridian.sricharan.dev:9090"
+  health_check:
+    interval: "10s"
+    timeout: "3s"
+    fail_threshold: 3
+
 projects:
   - id: proj_httpbin
     api_key: gv_live_sk_test_123456

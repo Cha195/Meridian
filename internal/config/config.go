@@ -10,13 +10,32 @@ import (
 
 type Config struct {
 	Node     NodeConfig       `yaml:"node"`
-	Projects []ProjectConfig `yaml:"projects"`
+	Cluster  ClusterConfig    `yaml:"cluster"`
+	Projects []ProjectConfig  `yaml:"projects"`
 }
 
 type NodeConfig struct {
 	ID      string `yaml:"id"`
 	Listen  string `yaml:"listen"`
 	GeoIPDB string `yaml:"geoip_db"`
+}
+
+type NodeLocation struct {
+	ID   string  `yaml:"id"`
+	Lat  float64 `yaml:"lat"`
+	Lng  float64 `yaml:"lng"`
+	Addr string  `yaml:"addr"`
+}
+
+type ClusterConfig struct {
+	Nodes       []NodeLocation    `yaml:"nodes"`
+	HealthCheck HealthCheckConfig `yaml:"health_check"`
+}
+
+type HealthCheckConfig struct {
+	Interval      string `yaml:"interval"`
+	Timeout       string `yaml:"timeout"`
+	FailThreshold int    `yaml:"fail_threshold"`
 }
 
 type ProjectConfig struct {
@@ -59,6 +78,37 @@ func ValidateConfig(cfg *Config) error {
 		return fmt.Errorf("node.id is required")
 	}
 
+	// Cluster validation
+	if len(cfg.Cluster.Nodes) == 0 {
+		return fmt.Errorf("cluster.nodes must have at least 1 entry")
+	}
+
+	seenNodeIDs := make(map[string]bool)
+	selfInCluster := false
+
+	for _, node := range cfg.Cluster.Nodes {
+		if seenNodeIDs[node.ID] {
+			return fmt.Errorf("duplicate node ID %q in cluster.nodes", node.ID)
+		}
+		seenNodeIDs[node.ID] = true
+
+		if node.Lat < -90 || node.Lat > 90 {
+			return fmt.Errorf("cluster node %q: lat %g is out of range [-90, 90]", node.ID, node.Lat)
+		}
+		if node.Lng < -180 || node.Lng > 180 {
+			return fmt.Errorf("cluster node %q: lng %g is out of range [-180, 180]", node.ID, node.Lng)
+		}
+
+		if node.ID == cfg.Node.ID {
+			selfInCluster = true
+		}
+	}
+
+	if !selfInCluster {
+		return fmt.Errorf("node.id %q must be present in cluster.nodes", cfg.Node.ID)
+	}
+
+	// Project validation
 	validPolicies := []string{"sieve", "w-tinylfu", "lru"}
 	seenHosts := make(map[string]bool)
 
