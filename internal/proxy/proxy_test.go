@@ -37,7 +37,7 @@ func TestProxyBasicForward(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestProxyCacheHit(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestProxyCacheNoPOST(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestProxyHostMatching(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestProxyTTLRules(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestCacheBypassWithAuthHeader(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestCacheBypassWithCookie(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestCacheWithPublicOverride(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestVaryHeaderCacheSeparation(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestVaryWildcardNotCached(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestPathRuleBypassesEverything(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil)
+	handler, err := NewProxyHandler(newTestConfig(origin.URL), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewProxyHandler failed: %v", err)
 	}

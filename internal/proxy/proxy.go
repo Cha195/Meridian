@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/cha195/meridian/internal/cache"
 	"github.com/cha195/meridian/internal/config"
+	"github.com/cha195/meridian/internal/events"
 	"github.com/cha195/meridian/internal/geo"
 )
 
@@ -29,15 +31,21 @@ type ProxyHandler struct {
 	caches       map[string]cache.CachePolicy
 	varyStore    map[string][]string // "METHOD:path" → Vary header names from origin
 	varyMu       sync.RWMutex
+	emitter      *events.Emitter
+	nodeID       string
+	deploymentID string
 }
 
-func NewProxyHandler(cfg *config.Config, geoLocator *geo.GeoLocator, clusterState *geo.ClusterState) (*ProxyHandler, error) {
+func NewProxyHandler(cfg *config.Config, geoLocator *geo.GeoLocator, clusterState *geo.ClusterState, emitter *events.Emitter) (*ProxyHandler, error) {
 	h := &ProxyHandler{
 		projects:     make(map[string]*config.ProjectConfig),
 		geoLocator:   geoLocator,
 		clusterState: clusterState,
 		caches:       make(map[string]cache.CachePolicy),
 		varyStore:    make(map[string][]string),
+		emitter:      emitter,
+		nodeID:       cfg.Node.ID,
+		deploymentID: os.Getenv("MERIDIAN_DEPLOYMENT_ID"),
 	}
 
 	for i := range cfg.Projects {
@@ -87,6 +95,57 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		geoResult = h.geoLocator.Lookup(clientIP)
 	}
 
+	// Compute routing fields once for both logging and event emission.
+	var closestNode string
+	var distanceKm float64
+	if h.clusterState != nil && (geoResult.Lat != 0 || geoResult.Lng != 0) {
+		closestNode = h.clusterState.ClosestNode(geoResult.Lat, geoResult.Lng)
+		distanceKm = h.clusterState.DistanceToNode(geoResult.Lat, geoResult.Lng, h.nodeID)
+	}
+	routingCorrect := h.nodeID != "" && closestNode == h.nodeID
+
+	cachePolicy := proj.Cache.Policy
+	if cachePolicy == "" {
+		cachePolicy = "sieve"
+	}
+	cacheTTL := int(getTTL(r.URL.Path, proj).Seconds())
+
+	// emit builds and sends a DiagnosticEvent. originLatencyMs is nil on HIT/STALE.
+	emit := func(cacheStatus string, statusCode int, responseSize int64, originLatencyMs *float64, ttfbMs float64) {
+		if h.emitter == nil {
+			return
+		}
+		h.emitter.Emit(events.DiagnosticEvent{
+			EventID:          events.NewEventID(),
+			ProjectID:        proj.ID,
+			Timestamp:        start,
+			ClientCountry:    geoResult.Country,
+			ClientCity:       geoResult.City,
+			ClientLat:        geoResult.Lat,
+			ClientLng:        geoResult.Lng,
+			ClientContinent:  geoResult.Continent,
+			EdgeNode:         h.nodeID,
+			ClosestNode:      closestNode,
+			RoutingCorrect:   routingCorrect,
+			DistanceToNodeKm: distanceKm,
+			CacheStatus:      cacheStatus,
+			CachePolicy:      cachePolicy,
+			CacheTTL:         cacheTTL,
+			TotalLatencyMs:   float64(time.Since(start)) / float64(time.Millisecond),
+			OriginLatencyMs:  originLatencyMs,
+			TTFBMs:           ttfbMs,
+			Method:           r.Method,
+			Path:             r.URL.Path,
+			StatusCode:       statusCode,
+			ResponseSize:     responseSize,
+			DeviceType:       events.ParseDeviceType(r.UserAgent()),
+			IsBot:            events.ParseIsBot(r.UserAgent()),
+			UserAgent:        r.UserAgent(),
+			Referer:          r.Referer(),
+			DeploymentID:     h.deploymentID,
+		})
+	}
+
 	// Cache safety has three layers:
 	//
 	// Layer 1: Auth bypass — requests with Authorization or Cookie headers
@@ -110,14 +169,18 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch status {
 	case cache.CacheHIT:
+		ttfbMs := float64(time.Since(start)) / float64(time.Millisecond)
 		writeFromCache(w, entry)
 		logRequest(r, proj.ID, "HIT", http.StatusOK, time.Since(start), geoResult)
+		emit("HIT", entry.Response.StatusCode, int64(len(entry.Response.Body)), nil, ttfbMs)
 		return
 
 	case cache.CacheSTALE:
+		ttfbMs := float64(time.Since(start)) / float64(time.Millisecond)
 		writeFromCache(w, entry)
 		go h.revalidate(r, proj, c, cacheKey, varyHeaders)
 		logRequest(r, proj.ID, "STALE", http.StatusOK, time.Since(start), geoResult)
+		emit("STALE", entry.Response.StatusCode, int64(len(entry.Response.Body)), nil, ttfbMs)
 		return
 	}
 
@@ -143,7 +206,9 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 	}
+	originStart := time.Now()
 	rp.ServeHTTP(rec, r)
+	originMs := float64(time.Since(originStart)) / float64(time.Millisecond)
 
 	// Layer 2: Vary header handling — read what the origin says varies,
 	// update varyStore, and rebuild the cache key with the correct values.
@@ -179,10 +244,12 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Add(k, v)
 		}
 	}
+	ttfbMs := float64(time.Since(start)) / float64(time.Millisecond)
 	w.WriteHeader(rec.statusCode)
 	w.Write(rec.body.Bytes())
 
 	logRequest(r, proj.ID, "MISS", rec.statusCode, time.Since(start), geoResult)
+	emit("MISS", rec.statusCode, int64(rec.body.Len()), &originMs, ttfbMs)
 }
 
 func (h *ProxyHandler) revalidate(r *http.Request, proj *config.ProjectConfig, c cache.CachePolicy, cacheKey string, varyHeaders []string) {

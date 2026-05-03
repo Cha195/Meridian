@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/cha195/meridian/internal/config"
+	"github.com/cha195/meridian/internal/events"
 	"github.com/cha195/meridian/internal/geo"
 	"github.com/cha195/meridian/internal/proxy"
 )
@@ -63,7 +64,10 @@ var serveCmd = &cobra.Command{
 			return fmt.Errorf("failed to initialize cluster state: %w", err)
 		}
 
-		handler, err := proxy.NewProxyHandler(cfg, geoLocator, clusterState)
+		emitter := events.NewEmitter(1000, events.NewStdoutOutput())
+		emitter.Start()
+
+		handler, err := proxy.NewProxyHandler(cfg, geoLocator, clusterState, emitter)
 		if err != nil {
 			return fmt.Errorf("failed to create proxy handler: %w", err)
 		}
@@ -108,7 +112,11 @@ var serveCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		return server.Shutdown(ctx)
+		if err := server.Shutdown(ctx); err != nil {
+			return err
+		}
+		emitter.Shutdown()
+		return nil
 	},
 }
 
