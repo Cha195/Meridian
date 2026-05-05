@@ -3,6 +3,7 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -353,5 +354,79 @@ func TestPathRuleBypassesEverything(t *testing.T) {
 
 	if callCount != 3 {
 		t.Errorf("path rule ttl:0 should bypass cache: expected 3 origin calls, got %d", callCount)
+	}
+}
+
+func TestStaleWhileRevalidate(t *testing.T) {
+	var callCount atomic.Int32
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("fresh content"))
+	}))
+	defer origin.Close()
+
+	cfg := &config.Config{
+		Node: config.NodeConfig{ID: "test-node", Listen: ":0"},
+		Projects: []config.ProjectConfig{
+			{
+				ID:     "proj_swr",
+				Origin: origin.URL,
+				Hosts:  []string{"swr.example.com"},
+				Cache: config.CacheConfig{
+					Policy:               "w-tinylfu",
+					DefaultTTL:           1,
+					MaxSizeMB:            64,
+					StaleWhileRevalidate: 60,
+				},
+			},
+		},
+	}
+
+	handler, err := NewProxyHandler(cfg, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewProxyHandler failed: %v", err)
+	}
+
+	// Request 1: MISS — fetches from origin.
+	req1 := httptest.NewRequest(http.MethodGet, "/page", nil)
+	req1.Host = "swr.example.com"
+	handler.ServeHTTP(httptest.NewRecorder(), req1)
+
+	if callCount.Load() != 1 {
+		t.Fatalf("expected 1 origin call after first request, got %d", callCount.Load())
+	}
+
+	// Wait for TTL to expire (1 second) but stay within stale window (60 seconds).
+	time.Sleep(1500 * time.Millisecond)
+
+	// Request 2: should get the stale cached response and trigger background revalidation.
+	req2 := httptest.NewRequest(http.MethodGet, "/page", nil)
+	req2.Host = "swr.example.com"
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if rec2.Body.String() != "fresh content" {
+		t.Fatalf("expected stale response body, got %q", rec2.Body.String())
+	}
+
+	// Wait for the background revalidation goroutine to complete.
+	time.Sleep(500 * time.Millisecond)
+
+	if callCount.Load() != 2 {
+		t.Fatalf("expected 2 origin calls (initial + revalidation), got %d", callCount.Load())
+	}
+
+	// Request 3: should be a fresh HIT from the revalidated entry.
+	req3 := httptest.NewRequest(http.MethodGet, "/page", nil)
+	req3.Host = "swr.example.com"
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, req3)
+
+	if callCount.Load() != 2 {
+		t.Fatalf("expected no additional origin call (fresh HIT), got %d", callCount.Load())
+	}
+	if rec3.Header().Get("X-Cache") != "HIT" {
+		t.Errorf("expected X-Cache: HIT after revalidation, got %q", rec3.Header().Get("X-Cache"))
 	}
 }

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -22,7 +23,8 @@ import (
 	"github.com/cha195/meridian/internal/geo"
 )
 
-const maxCacheBodySize = 10 * 1024 * 1024 // 10MB
+const maxCacheBodySize    = 10 * 1024 * 1024 // 10MB
+const maxVaryStoreEntries = 10000
 
 type ProxyHandler struct {
 	projects     map[string]*config.ProjectConfig
@@ -253,7 +255,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ProxyHandler) revalidate(r *http.Request, proj *config.ProjectConfig, c cache.CachePolicy, cacheKey string, varyHeaders []string) {
-	req := r.Clone(r.Context())
+	req := r.Clone(context.Background())
 
 	originURL, err := url.Parse(proj.Origin)
 	if err != nil {
@@ -380,6 +382,9 @@ func (h *ProxyHandler) getVaryHeaders(method, path string) []string {
 func (h *ProxyHandler) updateVaryHeaders(method, path string, headers []string) {
 	h.varyMu.Lock()
 	defer h.varyMu.Unlock()
+	if len(h.varyStore) >= maxVaryStoreEntries {
+		clear(h.varyStore)
+	}
 	h.varyStore[method+":"+path] = headers
 }
 

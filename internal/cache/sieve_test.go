@@ -206,3 +206,53 @@ func TestSieveStats(t *testing.T) {
 		t.Errorf("expected hit rate 0.666, got %f", stats.HitRate)
 	}
 }
+
+func TestSieveSetPreservesStaleDeadline(t *testing.T) {
+	cache := NewSieveCache(1024)
+	defer cache.Destroy()
+
+	ttl := time.Hour
+	staleExtra := 30 * time.Second
+	now := time.Now()
+
+	entry := makeEntry("k1", []byte("hello"))
+	entry.StaleDeadline = now.Add(ttl).Add(staleExtra)
+
+	cache.Set("k1", entry, ttl)
+
+	got, status := cache.Get("k1")
+	if status != CacheHIT {
+		t.Fatalf("expected HIT, got %v", status)
+	}
+
+	expectedStale := now.Add(ttl).Add(staleExtra)
+	diff := got.StaleDeadline.Sub(expectedStale)
+	if diff < -time.Second || diff > time.Second {
+		t.Fatalf("StaleDeadline was not preserved: expected ~%v, got %v (diff=%v)",
+			expectedStale, got.StaleDeadline, diff)
+	}
+}
+
+func TestSieveEvictionAllVisited(t *testing.T) {
+	cache := NewSieveCache(150)
+	defer cache.Destroy()
+
+	cache.Set("a", makeEntry("a", make([]byte, 40)), time.Hour)
+	cache.Set("b", makeEntry("b", make([]byte, 40)), time.Hour)
+	cache.Set("c", makeEntry("c", make([]byte, 40)), time.Hour)
+
+	cache.Get("a")
+	cache.Get("b")
+	cache.Get("c")
+
+	cache.Set("d", makeEntry("d", make([]byte, 40)), time.Hour)
+
+	if cache.Len() != 3 {
+		t.Fatalf("expected 3 entries after eviction, got %d", cache.Len())
+	}
+
+	stats := cache.Stats()
+	if stats.Evictions < 1 {
+		t.Fatalf("expected at least 1 eviction, got %d", stats.Evictions)
+	}
+}

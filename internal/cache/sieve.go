@@ -64,7 +64,6 @@ func (s *SieveCache) Set(key string, entry *CacheEntry, ttl time.Duration) {
 	now := time.Now()
 	entry.CreatedAt = now
 	entry.ExpiresAt = now.Add(ttl)
-	entry.StaleDeadline = now.Add(ttl).Add(time.Duration(entry.SizeBytes))
 
 	if node, found := s.entries[key]; found {
 		oldSize := node.size
@@ -239,19 +238,10 @@ func (s *SieveCache) evict() {
 		}
 
 		s.hand.visited = false
-		s.hand = s.hand.prev
-	}
-
-	if s.hand == nil && s.tail != nil {
-		s.hand = s.tail
-		if !s.hand.visited {
-			evicted := s.hand
-			s.hand = evicted.prev
-			s.removeNode(evicted)
-			s.evictions++
-			return
+		if s.hand.prev == nil {
+			s.hand = s.tail
+		} else {
+			s.hand = s.hand.prev
 		}
-		s.hand.visited = false
-		s.hand = s.hand.prev
 	}
 }

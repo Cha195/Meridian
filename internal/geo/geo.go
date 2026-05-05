@@ -62,17 +62,24 @@ func (g *GeoLocator) Lookup(ipStr string) GeoResult {
 	}
 }
 
-func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{
+var privateNetworks []*net.IPNet
+
+func init() {
+	for _, cidr := range []string{
 		"10.0.0.0/8",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
 		"127.0.0.0/8",
 		"::1/128",
 		"fc00::/7",
-	}
-	for _, cidr := range privateRanges {
+	} {
 		_, network, _ := net.ParseCIDR(cidr)
+		privateNetworks = append(privateNetworks, network)
+	}
+}
+
+func isPrivateIP(ip net.IP) bool {
+	for _, network := range privateNetworks {
 		if network.Contains(ip) {
 			return true
 		}
