@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/cha195/meridian/internal/api"
+	"github.com/cha195/meridian/internal/cache"
 	"github.com/cha195/meridian/internal/config"
 	"github.com/cha195/meridian/internal/events"
 	"github.com/cha195/meridian/internal/geo"
@@ -72,7 +74,31 @@ var serveCmd = &cobra.Command{
 			return fmt.Errorf("failed to create proxy handler: %w", err)
 		}
 
-		server := &http.Server{
+		caches := make(map[string]*cache.MigratingCache)
+		for _, proj := range cfg.Projects {
+			maxSize := int64(proj.Cache.MaxSizeMB) * 1024 * 1024
+			if maxSize == 0 {
+				maxSize = 512 * 1024 * 1024
+			}
+			policyName := proj.Cache.Policy
+			if policyName == "" {
+				policyName = "sieve"
+			}
+			policy, pErr := cache.NewPolicy(policyName, maxSize)
+			if pErr != nil {
+				return fmt.Errorf("project %s: %w", proj.ID, pErr)
+			}
+			caches[proj.ID] = cache.NewMigratingCache(policy)
+		}
+
+		// Start cluster health checks.
+		clusterState.StartHealthChecks(cfg.Cluster.HealthCheck)
+
+		// Start API server on port 9090.
+		apiServer := api.NewAPIServer(cfg, emitter, clusterState, geoLocator, caches)
+		apiHTTP := apiServer.Start(":9090")
+
+		proxyServer := &http.Server{
 			Addr:    cfg.Node.Listen,
 			Handler: handler,
 		}
@@ -101,8 +127,8 @@ var serveCmd = &cobra.Command{
 
 		go func() {
 			log.Printf("Meridian edge node [%s] listening on %s", cfg.Node.ID, cfg.Node.Listen)
-			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("server error: %v", err)
+			if err := proxyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("proxy server error: %v", err)
 			}
 		}()
 
@@ -112,7 +138,11 @@ var serveCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		if err := server.Shutdown(ctx); err != nil {
+		clusterState.StopHealthChecks()
+		if err := apiHTTP.Shutdown(ctx); err != nil {
+			log.Printf("API server shutdown error: %v", err)
+		}
+		if err := proxyServer.Shutdown(ctx); err != nil {
 			return err
 		}
 		emitter.Shutdown()
