@@ -1,9 +1,11 @@
 package geo
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/cha195/meridian/internal/config"
 )
@@ -12,6 +14,17 @@ type ClusterState struct {
 	nodes  []config.NodeLocation
 	selfID string
 	mu     sync.RWMutex
+
+	// Health check state (initialized by StartHealthChecks)
+	healthy             map[string]bool
+	lastCheck           map[string]time.Time
+	lastLatency         map[string]time.Duration
+	consecutiveFailures map[string]int
+	downSince           map[string]*time.Time
+	failThreshold       int
+	checkInterval       time.Duration
+	checkTimeout        time.Duration
+	cancel              context.CancelFunc
 }
 
 func NewClusterState(selfID string, nodes []config.NodeLocation) (*ClusterState, error) {
@@ -43,17 +56,24 @@ func (cs *ClusterState) ClosestNode(clientLat, clientLng float64) string {
 		return ""
 	}
 
-	closest := cs.nodes[0]
-	minDist := HaversineDistance(clientLat, clientLng, closest.Lat, closest.Lng)
+	var closest string
+	minDist := math.MaxFloat64
 
-	for _, node := range cs.nodes[1:] {
+	for _, node := range cs.nodes {
+		if cs.healthy != nil && !cs.healthy[node.ID] {
+			continue
+		}
 		d := HaversineDistance(clientLat, clientLng, node.Lat, node.Lng)
 		if d < minDist {
 			minDist = d
-			closest = node
+			closest = node.ID
 		}
 	}
-	return closest.ID
+
+	if closest == "" {
+		return cs.selfID
+	}
+	return closest
 }
 
 func (cs *ClusterState) DistanceToNode(clientLat, clientLng float64, nodeID string) float64 {
