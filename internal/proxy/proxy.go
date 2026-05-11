@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -30,7 +29,7 @@ type ProxyHandler struct {
 	projects     map[string]*config.ProjectConfig
 	geoLocator   *geo.GeoLocator
 	clusterState *geo.ClusterState
-	caches       map[string]cache.CachePolicy
+	caches       map[string]*cache.MigratingCache
 	varyStore    map[string][]string // "METHOD:path" → Vary header names from origin
 	varyMu       sync.RWMutex
 	emitter      *events.Emitter
@@ -38,12 +37,12 @@ type ProxyHandler struct {
 	deploymentID string
 }
 
-func NewProxyHandler(cfg *config.Config, geoLocator *geo.GeoLocator, clusterState *geo.ClusterState, emitter *events.Emitter) (*ProxyHandler, error) {
+func NewProxyHandler(cfg *config.Config, geoLocator *geo.GeoLocator, clusterState *geo.ClusterState, emitter *events.Emitter, caches map[string]*cache.MigratingCache) (*ProxyHandler, error) {
 	h := &ProxyHandler{
 		projects:     make(map[string]*config.ProjectConfig),
 		geoLocator:   geoLocator,
 		clusterState: clusterState,
-		caches:       make(map[string]cache.CachePolicy),
+		caches:       caches,
 		varyStore:    make(map[string][]string),
 		emitter:      emitter,
 		nodeID:       cfg.Node.ID,
@@ -52,23 +51,6 @@ func NewProxyHandler(cfg *config.Config, geoLocator *geo.GeoLocator, clusterStat
 
 	for i := range cfg.Projects {
 		proj := &cfg.Projects[i]
-
-		maxSize := int64(proj.Cache.MaxSizeMB) * 1024 * 1024
-		if maxSize == 0 {
-			maxSize = 512 * 1024 * 1024
-		}
-
-		policy := proj.Cache.Policy
-		if policy == "" {
-			policy = "sieve"
-		}
-
-		c, err := cache.NewPolicy(policy, maxSize)
-		if err != nil {
-			return nil, fmt.Errorf("project %q: %w", proj.ID, err)
-		}
-		h.caches[proj.ID] = c
-
 		for _, host := range proj.Hosts {
 			h.projects[host] = proj
 		}
@@ -222,20 +204,8 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if isCacheable(r, rec, proj) {
 			ttl := getTTL(r.URL.Path, proj)
 			if ttl > 0 {
-				// Rebuild key with the Vary headers we just learned from origin.
 				properKey := buildCacheKey(proj.ID, r, newVaryHeaders)
-				body := rec.body.Bytes()
-				ce := &cache.CacheEntry{
-					Key: properKey,
-					Response: cache.CachedResponse{
-						StatusCode: rec.statusCode,
-						Headers:    rec.header.Clone(),
-						Body:       body,
-					},
-					SizeBytes: int64(len(body)),
-				}
-				staleExtra := time.Duration(proj.Cache.StaleWhileRevalidate) * time.Second
-				ce.StaleDeadline = time.Now().Add(ttl).Add(staleExtra)
+				ce := newCacheEntry(properKey, rec, proj, ttl)
 				c.Set(properKey, ce, ttl)
 			}
 		}
@@ -283,18 +253,24 @@ func (h *ProxyHandler) revalidate(r *http.Request, proj *config.ProjectConfig, c
 	if isCacheable(r, rec, proj) {
 		ttl := getTTL(r.URL.Path, proj)
 		if ttl > 0 {
-			body := rec.body.Bytes()
-			ce := &cache.CacheEntry{
-				Key: cacheKey,
-				Response: cache.CachedResponse{
-					StatusCode: rec.statusCode,
-					Headers:    rec.header.Clone(),
-					Body:       body,
-				},
-				SizeBytes: int64(len(body)),
-			}
+			ce := newCacheEntry(cacheKey, rec, proj, ttl)
 			c.Set(cacheKey, ce, ttl)
 		}
+	}
+}
+
+func newCacheEntry(key string, rec *responseRecorder, proj *config.ProjectConfig, ttl time.Duration) *cache.CacheEntry {
+	body := rec.body.Bytes()
+	staleExtra := time.Duration(proj.Cache.StaleWhileRevalidate) * time.Second
+	return &cache.CacheEntry{
+		Key: key,
+		Response: cache.CachedResponse{
+			StatusCode: rec.statusCode,
+			Headers:    rec.header.Clone(),
+			Body:       body,
+		},
+		SizeBytes:     int64(len(body)),
+		StaleDeadline: time.Now().Add(ttl).Add(staleExtra),
 	}
 }
 

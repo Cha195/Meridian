@@ -69,11 +69,6 @@ var serveCmd = &cobra.Command{
 		emitter := events.NewEmitter(1000, events.NewStdoutOutput())
 		emitter.Start()
 
-		handler, err := proxy.NewProxyHandler(cfg, geoLocator, clusterState, emitter)
-		if err != nil {
-			return fmt.Errorf("failed to create proxy handler: %w", err)
-		}
-
 		caches := make(map[string]*cache.MigratingCache)
 		for _, proj := range cfg.Projects {
 			maxSize := int64(proj.Cache.MaxSizeMB) * 1024 * 1024
@@ -89,6 +84,11 @@ var serveCmd = &cobra.Command{
 				return fmt.Errorf("project %s: %w", proj.ID, pErr)
 			}
 			caches[proj.ID] = cache.NewMigratingCache(policy)
+		}
+
+		handler, err := proxy.NewProxyHandler(cfg, geoLocator, clusterState, emitter, caches)
+		if err != nil {
+			return fmt.Errorf("failed to create proxy handler: %w", err)
 		}
 
 		// Start cluster health checks.

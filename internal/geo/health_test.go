@@ -207,3 +207,40 @@ func TestClosestNodeSkipsUnhealthy(t *testing.T) {
 		t.Error("should not route to unhealthy node eu")
 	}
 }
+
+func TestUpdateNodesWithHealthChecks(t *testing.T) {
+	nodes := []config.NodeLocation{
+		{ID: "us", Lat: 39.04, Lng: -77.47, Addr: "http://localhost:1"},
+		{ID: "eu", Lat: 51.50, Lng: -0.12, Addr: "http://localhost:2"},
+	}
+	cs, _ := NewClusterState("us", nodes)
+
+	cs.mu.Lock()
+	cs.initHealthState()
+	cs.mu.Unlock()
+
+	// Add a new node (jp) and keep us; remove eu.
+	cs.UpdateNodes([]config.NodeLocation{
+		{ID: "us", Lat: 39.04, Lng: -77.47, Addr: "http://localhost:1"},
+		{ID: "jp", Lat: 35.68, Lng: 139.69, Addr: "http://localhost:3"},
+	})
+
+	// New node (jp) should be healthy by default and routable.
+	cs.mu.RLock()
+	jpHealthy := cs.healthy["jp"]
+	_, euExists := cs.healthy["eu"]
+	cs.mu.RUnlock()
+
+	if !jpHealthy {
+		t.Error("newly added node jp should default to healthy")
+	}
+	if euExists {
+		t.Error("removed node eu should be cleaned from health maps")
+	}
+
+	// Tokyo client should route to jp (closest healthy node).
+	closest := cs.ClosestNode(35.68, 139.69)
+	if closest != "jp" {
+		t.Errorf("expected jp as closest for Tokyo client, got %s", closest)
+	}
+}

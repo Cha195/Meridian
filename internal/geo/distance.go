@@ -95,6 +95,32 @@ func (cs *ClusterState) UpdateNodes(nodes []config.NodeLocation) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.nodes = nodesCopy
+
+	if cs.healthy == nil {
+		return
+	}
+
+	newIDs := make(map[string]bool, len(nodesCopy))
+	for _, n := range nodesCopy {
+		newIDs[n.ID] = true
+	}
+
+	for _, n := range nodesCopy {
+		if _, ok := cs.healthy[n.ID]; !ok {
+			cs.healthy[n.ID] = true
+			cs.consecutiveFailures[n.ID] = 0
+		}
+	}
+
+	for id := range cs.healthy {
+		if !newIDs[id] {
+			delete(cs.healthy, id)
+			delete(cs.lastCheck, id)
+			delete(cs.lastLatency, id)
+			delete(cs.consecutiveFailures, id)
+			delete(cs.downSince, id)
+		}
+	}
 }
 
 func (cs *ClusterState) GetNodes() []config.NodeLocation {
