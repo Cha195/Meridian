@@ -1,0 +1,14 @@
+[Unit]
+Description=Meridian CDN Edge Node
+After=network.target redis-server.service
+
+[Service]
+Type=simple
+User=meridian
+ExecStart=/opt/meridian/bin/meridian serve --config /opt/meridian/config/meridian.yaml
+Restart=always
+RestartSec=5
+Environment=MERIDIAN_DEPLOYMENT_ID=%H
+
+[Install]
+WantedBy=multi-user.target
