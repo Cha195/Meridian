@@ -31,8 +31,9 @@ _load_tf_outputs() {
   NODES_JSON=$(cd "$TF_DIR" && terraform output -json nodes)
   NODE_NAMES=$(echo "$NODES_JSON" | jq -r 'keys[]')
   MERIDIAN_API_KEY=$(cd "$TF_DIR" && terraform output -raw api_key 2>/dev/null) || MERIDIAN_API_KEY=""
+  MERIDIAN_DB_PASSWORD="${MERIDIAN_DB_PASSWORD:-$(cd "$TF_DIR" && terraform output -raw db_password 2>/dev/null || echo "")}"
 
-  export NODES_JSON NODE_NAMES MERIDIAN_API_KEY
+  export NODES_JSON NODE_NAMES MERIDIAN_API_KEY MERIDIAN_DB_PASSWORD
 }
 
 node_ip() {

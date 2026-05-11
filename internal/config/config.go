@@ -11,7 +11,12 @@ import (
 type Config struct {
 	Node     NodeConfig       `yaml:"node"`
 	Cluster  ClusterConfig    `yaml:"cluster"`
+	Database DatabaseConfig   `yaml:"database"`
 	Projects []ProjectConfig  `yaml:"projects"`
+}
+
+type DatabaseConfig struct {
+	ConnString string `yaml:"conn_string"`
 }
 
 type NodeConfig struct {

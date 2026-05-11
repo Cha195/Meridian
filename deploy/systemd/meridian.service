@@ -1,6 +1,6 @@
 [Unit]
 Description=Meridian CDN Edge Node
-After=network.target redis-server.service
+After=network.target
 
 [Service]
 Type=simple

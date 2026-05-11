@@ -21,6 +21,9 @@ node:
   listen: ":8080"
   geoip_db: /path/to/GeoLite2-City.mmdb
 
+database:
+  conn_string: "postgres://meridian:pass@localhost:5432/meridian?sslmode=disable"
+
 cluster:
   nodes:
     - id: us-east-1
@@ -67,6 +70,9 @@ projects:
 	}
 	if len(cfg.Cluster.Nodes) != 1 {
 		t.Errorf("expected 1 cluster node, got %d", len(cfg.Cluster.Nodes))
+	}
+	if cfg.Database.ConnString != "postgres://meridian:pass@localhost:5432/meridian?sslmode=disable" {
+		t.Errorf("expected database conn_string to be parsed, got %q", cfg.Database.ConnString)
 	}
 }
 

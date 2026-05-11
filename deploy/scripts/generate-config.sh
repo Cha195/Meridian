@@ -24,6 +24,15 @@ if ! echo "$NODE_NAMES" | grep -qw "$NODE_ID"; then
 fi
 
 API_KEY="${MERIDIAN_API_KEY:-CHANGE_ME}"
+DB_PASSWORD="${MERIDIAN_DB_PASSWORD:-}"
+
+# Database connection: primary node connects to localhost, edge nodes to primary's IP
+PRIMARY_IP=$(primary_ip)
+if node_is_primary "$NODE_ID"; then
+  DB_HOST="127.0.0.1"
+else
+  DB_HOST="$PRIMARY_IP"
+fi
 
 # Build cluster.nodes list dynamically from Terraform output
 cluster_nodes=""
@@ -38,11 +47,20 @@ for name in $NODE_NAMES; do
 "
 done
 
+# Build database section if password is available
+db_section=""
+if [ -n "$DB_PASSWORD" ]; then
+  db_section="database:
+  conn_string: \"postgres://meridian:${DB_PASSWORD}@${DB_HOST}:5432/meridian?sslmode=disable\""
+fi
+
 cat <<EOF
 node:
   id: "$NODE_ID"
   listen: ":8080"
   geoip_db: /opt/meridian/data/GeoLite2-City.mmdb
+${db_section:+
+$db_section}
 
 cluster:
   nodes:

@@ -17,6 +17,7 @@ import (
 	"github.com/cha195/meridian/internal/events"
 	"github.com/cha195/meridian/internal/geo"
 	"github.com/cha195/meridian/internal/proxy"
+	"github.com/cha195/meridian/internal/storage"
 )
 
 var (
@@ -66,7 +67,21 @@ var serveCmd = &cobra.Command{
 			return fmt.Errorf("failed to initialize cluster state: %w", err)
 		}
 
-		emitter := events.NewEmitter(1000, events.NewStdoutOutput())
+		outputs := []events.EventOutput{events.NewStdoutOutput()}
+
+		if cfg.Database.ConnString != "" {
+			pgStore, pgErr := storage.NewPostgresStore(cfg.Database.ConnString)
+			if pgErr != nil {
+				log.Printf("warning: database unavailable, events go to stdout only: %v", pgErr)
+			} else {
+				outputs = append(outputs, pgStore)
+				log.Printf("database connected: events will be stored in Postgres")
+			}
+		} else {
+			log.Printf("database not configured, events go to stdout only")
+		}
+
+		emitter := events.NewEmitter(1000, outputs...)
 		emitter.Start()
 
 		caches := make(map[string]*cache.MigratingCache)

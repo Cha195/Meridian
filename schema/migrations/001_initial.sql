@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS projects (
 -- retention policy (DROP old partitions). See: future migration 002_partitioning.sql
 CREATE TABLE IF NOT EXISTS events (
     event_id            TEXT PRIMARY KEY,
-    project_id          TEXT NOT NULL REFERENCES projects(id),
+    project_id          TEXT NOT NULL,
     timestamp           TIMESTAMPTZ NOT NULL,
 
     -- client geo
@@ -71,7 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_events_edge_node    ON events (edge_node, timesta
 -- Hourly aggregates for the analytics dashboard.
 -- Populated by the event pipeline (Stage 9) or a cron job.
 CREATE TABLE IF NOT EXISTS hourly_stats (
-    project_id      TEXT NOT NULL REFERENCES projects(id),
+    project_id      TEXT NOT NULL,
     edge_node       TEXT NOT NULL,
     hour            TIMESTAMPTZ NOT NULL,
     cache_policy    TEXT NOT NULL,

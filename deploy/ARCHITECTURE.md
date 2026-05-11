@@ -20,7 +20,6 @@ involved, and the reasoning behind each design decision.
       │                  │ │                  │ │                  │
       │  Meridian proxy  │ │  Meridian proxy  │ │  Meridian proxy  │
       │  Admin API :9090 │ │  Admin API :9090 │ │  Admin API :9090 │
-      │  Redis (local)   │ │  Redis (local)   │ │  Redis (local)   │
       │  Postgres        │ │                  │ │                  │
       │  (primary only)  │ │                  │ │                  │
       └──────────────────┘ └──────────────────┘ └──────────────────┘
@@ -30,8 +29,39 @@ Three identical EC2 instances, each running the same Meridian binary. The only
 difference is Virginia (us-east-1) also runs Postgres as the central analytics
 store. Ireland and Tokyo send events to Virginia's Postgres over the internet.
 
-Redis runs on every node as a local event buffer — if Postgres is unreachable,
-events queue in Redis instead of being dropped.
+## Event pipeline
+
+```
+Proxy request arrives
+  → proxy.ServeHTTP emits a DiagnosticEvent
+  → Emitter.Emit(event) — non-blocking channel send (drops if channel full)
+  → Emitter worker goroutine reads from the channel
+  → StdoutOutput.Write(event) — JSON line to stdout (for local debugging)
+  → PostgresStore.Write(event) — appends to an in-memory buffer
+  → When buffer hits 100 events OR 5 seconds pass (whichever first):
+      → pgx.CopyFrom batch-inserts all buffered events in one round trip
+      → Buffer is cleared
+```
+
+**Why batching:** inserting events one-at-a-time means one Postgres round trip
+per request. At 1000 req/s, that's 1000 round trips/s. Batching 100 events
+into one INSERT means 10 round trips/s — 100x fewer. The `CopyFrom` method
+uses Postgres's COPY protocol, which is even faster than multi-row INSERT.
+
+**Why a flush ticker:** if traffic is low (say, 5 requests/minute), the buffer
+never hits 100 events. Without the ticker, those events would sit in memory
+indefinitely. The 5-second ticker ensures events reach Postgres within 5s
+even under low traffic.
+
+**Why a mutex:** two goroutines touch the buffer — the Emitter's worker
+(calling `Write`) and the flush ticker (calling `Flush`). The mutex prevents
+them from appending and flushing simultaneously.
+
+**Failure mode:** if Postgres is unreachable (network blip, maintenance), the
+CopyFrom call fails. The events in that batch are logged and dropped. The
+proxy never blocks — `Emitter.Emit` is non-blocking (drops on channel full)
+and `PostgresStore.Write` just appends to the buffer (fast). User-facing
+latency is never affected by database issues.
 
 ## How users reach the right server
 

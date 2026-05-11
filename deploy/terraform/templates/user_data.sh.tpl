@@ -10,7 +10,7 @@ echo "Started at $(date -u)"
 # --- System packages ---
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y redis-server jq curl unzip
+apt-get install -y jq curl unzip
 
 %{ if is_primary ~}
 # --- Postgres (primary node only) ---
@@ -45,10 +45,6 @@ WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'meridian')\gexec
 EOSQL
 %{ endif ~}
 
-# --- Redis — bind to localhost only (security) ---
-sed -i 's/^bind .*/bind 127.0.0.1 ::1/' /etc/redis/redis.conf
-systemctl restart redis-server
-
 # --- Meridian user and directories ---
 useradd --system --shell /usr/sbin/nologin --home-dir /opt/meridian meridian || true
 mkdir -p /opt/meridian/{bin,config,data}
@@ -68,7 +64,7 @@ rm -rf geolite2.tar.gz GeoLite2-City_*
 cat > /etc/systemd/system/meridian.service <<'EOF'
 [Unit]
 Description=Meridian CDN Edge Node
-After=network.target redis-server.service
+After=network.target
 
 [Service]
 Type=simple
