@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meridian CDN</title>
+  <link rel="stylesheet" href="/css/styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r169/three.min.js"></script>
+</head>
+<body>
+  <!-- Auth screen -->
+  <div id="auth-screen" class="auth-screen">
+    <div class="auth-card">
+      <h1>Meridian</h1>
+      <p>Enter your API key to access the dashboard</p>
+      <input type="password" id="api-key-input" placeholder="API key" autocomplete="off">
+      <button id="auth-submit">Connect</button>
+      <p id="auth-error" class="error" hidden></p>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashboard" hidden>
+    <nav class="nav">
+      <span class="nav-brand">Meridian</span>
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-view="globe">Globe</button>
+        <button class="nav-tab" data-view="cache-lab">Cache Lab</button>
+        <button class="nav-tab" data-view="performance">Performance</button>
+      </div>
+      <span class="nav-status" id="ws-status">connecting...</span>
+    </nav>
+
+    <!-- Globe View -->
+    <div class="view active" id="view-globe">
+      <div class="globe-container" id="globe-container"></div>
+      <aside class="sidebar" id="sidebar">
+        <div class="stat-cards">
+          <div class="stat-card">
+            <span class="stat-label">Active Now</span>
+            <span class="stat-value" id="stat-active">-</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Today</span>
+            <span class="stat-value" id="stat-today">-</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">P95 Latency</span>
+            <span class="stat-value" id="stat-p95">-</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Hit Rate</span>
+            <span class="stat-value" id="stat-hitrate">-</span>
+          </div>
+        </div>
+        <h3>Top Countries</h3>
+        <div id="country-list" class="country-list"></div>
+        <h3>Live Feed</h3>
+        <div id="live-feed" class="live-feed"></div>
+      </aside>
+    </div>
+
+    <!-- Cache Lab View -->
+    <div class="view" id="view-cache-lab">
+      <div class="panel">
+        <h2>Cache Policies</h2>
+        <div id="cache-policies"></div>
+        <h2>Migration</h2>
+        <div id="migration-status"></div>
+        <div class="migration-controls">
+          <select id="migrate-policy">
+            <option value="sieve">SIEVE</option>
+            <option value="w-tinylfu">W-TinyLFU</option>
+            <option value="lru">LRU</option>
+          </select>
+          <button id="btn-migrate-start">Start Migration</button>
+          <button id="btn-migrate-abort">Abort</button>
+        </div>
+        <h2>Cache Overview</h2>
+        <div id="cache-overview"></div>
+      </div>
+    </div>
+
+    <!-- Performance View -->
+    <div class="view" id="view-performance">
+      <div class="panel">
+        <h2>Request Timeseries</h2>
+        <canvas id="timeseries-chart" width="900" height="300"></canvas>
+        <h2>Routing Analysis</h2>
+        <div id="routing-analysis"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/api.js"></script>
+  <script src="/js/globe.js"></script>
+  <script src="/js/sidebar.js"></script>
+  <script src="/js/views.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

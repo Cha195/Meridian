@@ -59,6 +59,10 @@ func NewPostgresStore(connString string) (*PostgresStore, error) {
 	return s, nil
 }
 
+func (s *PostgresStore) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
 func (s *PostgresStore) Write(event events.DiagnosticEvent) error {
 	s.mu.Lock()
 	s.buffer = append(s.buffer, event)

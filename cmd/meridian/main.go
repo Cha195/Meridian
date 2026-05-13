@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	meridian "github.com/cha195/meridian"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/cha195/meridian/internal/api"
 	"github.com/cha195/meridian/internal/cache"
 	"github.com/cha195/meridian/internal/config"
@@ -68,13 +71,17 @@ var serveCmd = &cobra.Command{
 		}
 
 		outputs := []events.EventOutput{events.NewStdoutOutput()}
+		wsBroadcaster := api.NewWebSocketBroadcaster()
+		outputs = append(outputs, wsBroadcaster)
 
+		var dbPool *pgxpool.Pool
 		if cfg.Database.ConnString != "" {
 			pgStore, pgErr := storage.NewPostgresStore(cfg.Database.ConnString)
 			if pgErr != nil {
 				log.Printf("warning: database unavailable, events go to stdout only: %v", pgErr)
 			} else {
 				outputs = append(outputs, pgStore)
+				dbPool = pgStore.Pool()
 				log.Printf("database connected: events will be stored in Postgres")
 			}
 		} else {
@@ -109,8 +116,17 @@ var serveCmd = &cobra.Command{
 		// Start cluster health checks.
 		clusterState.StartHealthChecks(cfg.Cluster.HealthCheck)
 
+		dashFS, _ := fs.Sub(meridian.DashboardFS, "dashboard")
+
 		// Start API server on port 9090.
-		apiServer := api.NewAPIServer(cfg, emitter, clusterState, geoLocator, caches)
+		apiOpts := []api.APIServerOption{
+			api.WithWebSocketBroadcaster(wsBroadcaster),
+			api.WithDashboardFS(dashFS),
+		}
+		if dbPool != nil {
+			apiOpts = append(apiOpts, api.WithDB(dbPool))
+		}
+		apiServer := api.NewAPIServer(cfg, emitter, clusterState, geoLocator, caches, apiOpts...)
 		apiHTTP := apiServer.Start(":9090")
 
 		proxyServer := &http.Server{

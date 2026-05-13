@@ -63,6 +63,114 @@ proxy never blocks — `Emitter.Emit` is non-blocking (drops on channel full)
 and `PostgresStore.Write` just appends to the buffer (fast). User-facing
 latency is never affected by database issues.
 
+## How the API server is wired together
+
+The API server (`internal/api/server.go`) is assembled in `cmd/meridian/main.go`
+using functional options. Each option injects an optional dependency:
+
+```go
+apiServer := api.NewAPIServer(cfg, emitter, clusterState, geoLocator, caches,
+    api.WithWebSocketBroadcaster(wsBroadcaster),
+    api.WithDashboardFS(dashFS),
+    api.WithDB(dbPool),
+)
+```
+
+**Why functional options instead of a big constructor?** Not every dependency
+exists in every environment. If Postgres is down at startup, `dbPool` is nil.
+If the dashboard files aren't embedded, `dashFS` is nil. The API server works
+without any of these — it just skips the routes that need them. The option
+pattern lets the caller wire up only what's available.
+
+### The three optional dependencies
+
+**`dbPool` (`*pgxpool.Pool`)** — a connection pool to Postgres. Created by
+`PostgresStore` when the database config is present. Shared between the
+PostgresStore (which uses it for batch event inserts) and the API server
+(which uses it for dashboard query endpoints like `/api/v1/stats/live`).
+
+`pgxpool` manages a pool of connections internally — it opens connections on
+demand, reuses them, and caps the total. You don't open/close connections
+per query. Every `pool.Query()` or `pool.QueryRow()` borrows a connection,
+runs the query, and returns it to the pool. If all connections are in use,
+new queries wait. This is standard database connection pooling.
+
+If `dbPool` is nil (Postgres not configured), all dashboard endpoints return
+503 Service Unavailable. The proxy still works — it just can't show analytics.
+
+**`wsBroadcaster` (`*WebSocketBroadcaster`)** — pushes live events to connected
+dashboard clients over WebSocket. It implements the `EventOutput` interface,
+so the emitter writes events to it alongside stdout and Postgres.
+
+How it works internally:
+
+```
+Emitter worker goroutine
+  → wsBroadcaster.Write(event)
+  → marshal event to JSON (once, shared across all clients)
+  → for each connected client:
+      → try to send JSON to client's channel (buffered, size 64)
+      → if channel is full (slow client): drop the event for that client
+  → return immediately (never blocks the emitter)
+
+Per-client write goroutine (one per WebSocket connection):
+  → reads from the client's channel
+  → writes to the WebSocket connection
+  → if write fails (client disconnected): removes client, closes connection
+```
+
+The key design: the emitter's `Write()` call is O(N) where N is the number
+of connected clients, but each client gets a buffered channel. If a client
+can't keep up (slow network, suspended browser tab), events are dropped for
+THAT client only — other clients and the emitter are unaffected. This is the
+"per-client channel with select/default drop" pattern.
+
+Authentication for WebSocket uses a query parameter (`?key=API_KEY`) instead
+of the `Authorization` header, because the browser's `WebSocket` API doesn't
+support custom headers.
+
+**`dashFS` (`fs.FS`)** — the dashboard's HTML, CSS, and JS files, embedded
+into the Go binary via `//go:embed dashboard/*` in `dashboard.go` at the
+project root.
+
+```go
+//go:embed dashboard/*
+var DashboardFS embed.FS
+```
+
+At startup, `fs.Sub(meridian.DashboardFS, "dashboard")` strips the `dashboard/`
+prefix so `index.html` is served at `/` instead of `/dashboard/index.html`.
+
+The embed directive means the dashboard ships inside the binary — no separate
+files to deploy, no directory to SCP. `deploy.sh` pushes one file and the
+dashboard is included. If the dashboard files are missing at compile time
+(e.g., someone deleted the directory), the embed fails at build time, not at
+runtime.
+
+### How events flow through all three outputs
+
+```
+Proxy request
+  → proxy.ServeHTTP emits DiagnosticEvent
+  → emitter.Emit(event)  [non-blocking channel send]
+  → emitter worker goroutine reads event
+  → StdoutOutput.Write(event)         → JSON line to stdout
+  → PostgresStore.Write(event)        → append to buffer → batch CopyFrom to Postgres
+  → WebSocketBroadcaster.Write(event) → fan out to connected dashboard clients
+
+All three happen sequentially in the emitter's single worker goroutine.
+If any Write is slow, it delays the others. That's why:
+  - StdoutOutput is a simple Encode (fast, ~microseconds)
+  - PostgresStore just appends to a buffer (fast, ~microseconds)
+    and does the actual CopyFrom in a separate timer goroutine
+  - WebSocketBroadcaster just sends to channels (fast, ~microseconds)
+    and each client has its own write goroutine for the actual WebSocket send
+```
+
+None of the three outputs block on network I/O in their `Write()` method.
+The network calls (Postgres CopyFrom, WebSocket write) happen in background
+goroutines. This ensures the emitter's worker processes events at memory speed.
+
 ## How users reach the right server
 
 When a user's browser resolves `proxy.meridian.sricharan.dev`, the request goes
